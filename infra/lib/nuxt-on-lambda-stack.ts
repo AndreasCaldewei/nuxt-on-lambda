@@ -18,6 +18,8 @@ import {
 import {
   S3Origin,
   FunctionUrlOrigin,
+  OriginGroup,
+  HttpOrigin,
 } from "aws-cdk-lib/aws-cloudfront-origins";
 import { Construct } from "constructs";
 
@@ -55,48 +57,60 @@ export class NuxtOnLambdaStack extends Stack {
         code: FunctionCode.fromInline(
           /* Javascript */
           `
-        function handler(event) {
-          var request = event.request;
-          var uri = request.uri;
-
-          // Check if the request is for a file in the static directory
-          if (uri.startsWith('/static/')) {
-            // If the URI doesn't end with a file extension, append 'index.html'
-            if (!uri.includes('.')) {
-              request.uri = uri.replace(/\/?$/, '/') + 'index.html';
-            }
+          function handler(event) {
+              var request = event.request;
+              var uri = request.uri;
+              if (!uri.includes('.')) {
+                  request.uri = uri.replace(/\/?$/, '/') + 'index.html';
+              }
+              return request;
           }
-
-          return request;
-        }
       `,
         ),
       },
     );
 
-    const distribution = new Distribution(this, "NuxtDistribution", {
-      defaultBehavior: {
-        origin: new FunctionUrlOrigin(functionUrl),
-        viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        allowedMethods: AllowedMethods.ALLOW_ALL,
-        originRequestPolicy: OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
-      },
-      additionalBehaviors: {
-        "_nuxt/*": {
+    const staticDistributaion = new Distribution(
+      this,
+      "NuxtStaticDistribution",
+      {
+        defaultRootObject: "index.html",
+        defaultBehavior: {
           origin: new S3Origin(staticBucket, { originAccessIdentity }),
           viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-          cachePolicy: CachePolicy.CACHING_OPTIMIZED,
-        },
-        "static/*": {
-          origin: new S3Origin(staticBucket, { originAccessIdentity }),
-          viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-          cachePolicy: CachePolicy.CACHING_OPTIMIZED,
+          cachePolicy: CachePolicy.CACHING_DISABLED,
           functionAssociations: [
             {
               function: urlRewriteFunction,
               eventType: FunctionEventType.VIEWER_REQUEST,
             },
           ],
+        },
+      },
+    );
+
+    const origin = new OriginGroup({
+      primaryOrigin: new HttpOrigin(staticDistributaion.domainName),
+      fallbackOrigin: new FunctionUrlOrigin(functionUrl),
+      fallbackStatusCodes: [403, 404],
+    });
+
+    const distribution = new Distribution(this, "NuxtDistribution", {
+      defaultBehavior: {
+        origin: origin,
+        viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        allowedMethods: AllowedMethods.ALLOW_GET_HEAD,
+      },
+      additionalBehaviors: {
+        "/": {
+          origin: new FunctionUrlOrigin(functionUrl),
+          viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          allowedMethods: AllowedMethods.ALLOW_GET_HEAD,
+        },
+        "*.*": {
+          origin: new S3Origin(staticBucket, { originAccessIdentity }),
+          viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          cachePolicy: CachePolicy.CACHING_OPTIMIZED,
         },
       },
       errorResponses: [
